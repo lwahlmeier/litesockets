@@ -8,8 +8,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
@@ -18,10 +18,11 @@ import javax.net.ssl.SSLEngineResult.Status;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLSession;
 
+import org.threadly.concurrent.future.FutureCallback;
 import org.threadly.concurrent.future.ListenableFuture;
 import org.threadly.concurrent.future.SettableListenableFuture;
+import org.threadly.concurrent.future.Watchdog;
 import org.threadly.litesockets.Client;
-import org.threadly.litesockets.SocketExecuterInterface;
 import org.threadly.litesockets.utils.MergedByteBuffers;
 import org.threadly.util.Clock;
 import org.threadly.util.ExceptionUtils;
@@ -34,7 +35,6 @@ import org.threadly.util.ExceptionUtils;
  *
  */
 public class SSLClient extends TCPClient {
-
   private final AtomicBoolean finishedHandshake = new AtomicBoolean(false);
   private final AtomicBoolean startedHandshake = new AtomicBoolean(false);
   private final boolean connectHandshake;
@@ -43,6 +43,7 @@ public class SSLClient extends TCPClient {
   private final Reader classReader = new SSLReader();
   private final SSLEngine ssle;
   private final ByteBuffer encryptedReadBuffer;
+  private final AtomicReference<Watchdog> watchdog = new AtomicReference<Watchdog>(null);
 
   private volatile Reader sslReader;
   private ByteBuffer writeBuffer;
@@ -231,6 +232,20 @@ public class SSLClient extends TCPClient {
     return true;
   }
 
+  protected Watchdog getWatchdog() {
+    Watchdog result = watchdog.get();
+    if (result == null) {
+      if (seb == null) {
+        result = new Watchdog(maxConnectionTime, true);
+      } else {
+        result = new Watchdog(seb.getThreadScheduler(), maxConnectionTime, true);
+      }
+      if (! watchdog.compareAndSet(null, result)) {
+        return watchdog.get();
+      }
+    }
+    return result;
+  }
 
   /**
    * <p>If doHandshake was set to false in the constructor you can start the handshake by calling this method.
@@ -245,6 +260,17 @@ public class SSLClient extends TCPClient {
   public ListenableFuture<SSLSession> doHandShake() {
     if(startedHandshake.compareAndSet(false, true)) {
       handshakeFuture = new SettableListenableFuture<SSLSession>();
+      handshakeFuture.addCallback(new FutureCallback<SSLSession>() {
+        @Override
+        public void handleResult(SSLSession result) {
+          // ignored
+        }
+
+        @Override
+        public void handleFailure(Throwable t) {
+          close();
+        }
+      });
       try {
         ssle.beginHandshake();
       } catch (SSLException e) {
@@ -253,33 +279,9 @@ public class SSLClient extends TCPClient {
       if(ssle.getHandshakeStatus() == NEED_WRAP) {
         writeForce(ByteBuffer.allocate(0));
       }
-      if(this.seb != null) {
-        seb.getThreadScheduler().schedule(new Runnable() {
-          @Override
-          public void run() {
-            if(!handshakeFuture.isDone()) {
-              handshakeFuture.setFailure(new TimeoutException("Timed out doing SSLHandshake!!!"));
-              close();
-            }
-          }}, maxConnectionTime);
-      }
+      getWatchdog().watch(handshakeFuture);
     }
     return handshakeFuture;
-  }
-
-  @Override
-  protected void setClientsSocketExecuter(SocketExecuterInterface sei) {
-    super.setClientsSocketExecuter(sei);
-    if(startedHandshake.get() && !handshakeFuture.isDone()) {
-      sei.getThreadScheduler().schedule(new Runnable() {
-        @Override
-        public void run() {
-          if(!handshakeFuture.isDone()) {
-            handshakeFuture.setFailure(new TimeoutException("Timed out doing SSLHandshake!!!"));
-            close();
-          }
-        }}, maxConnectionTime);
-    }
   }
 
   private void runTasks() {
