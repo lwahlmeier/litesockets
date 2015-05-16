@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.threadly.concurrent.future.ListenableFuture;
 import org.threadly.concurrent.future.SettableListenableFuture;
+import org.threadly.concurrent.future.Watchdog;
 import org.threadly.litesockets.Client;
 import org.threadly.litesockets.SocketExecuterInterface;
 import org.threadly.litesockets.SocketExecuterInterface.WireProtocol;
@@ -56,6 +57,7 @@ public class TCPClient extends Client {
   protected final AtomicBoolean startedConnection = new AtomicBoolean(false);
   protected final SettableListenableFuture<Boolean> connectionFuture = new SettableListenableFuture<Boolean>(false);
 
+  protected volatile Watchdog watchdog = null;
   protected volatile SocketChannel channel;
   protected volatile int maxBufferSize = DEFAULT_MAX_BUFFER_SIZE;
   protected volatile int minAllowedReadBuffer = MIN_READ_BUFFER_SIZE;
@@ -142,6 +144,9 @@ public class TCPClient extends Client {
         channel.configureBlocking(false);
         channel.connect(new InetSocketAddress(host, port));
         connectExpiresAt = maxConnectionTime + Clock.lastKnownForwardProgressingMillis();
+        if(watchdog != null) {
+          watchdog.watch(connectionFuture);
+        }
       } catch (Exception e) {
         connectionFuture.setFailure(e);
         close();
@@ -309,6 +314,10 @@ public class TCPClient extends Client {
   protected void setClientsSocketExecuter(SocketExecuterInterface seb) {
     if(seb != null) {
       this.seb = seb;
+      watchdog = new Watchdog(seb.getThreadScheduler(), this.maxConnectionTime, false);
+      if(!connectionFuture.isDone()) {
+        watchdog.watch(connectionFuture);
+      }
     }
   }
 

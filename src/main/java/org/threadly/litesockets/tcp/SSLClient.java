@@ -8,7 +8,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
@@ -20,8 +19,8 @@ import javax.net.ssl.SSLSession;
 import org.threadly.concurrent.future.FutureCallback;
 import org.threadly.concurrent.future.ListenableFuture;
 import org.threadly.concurrent.future.SettableListenableFuture;
-import org.threadly.concurrent.future.Watchdog;
 import org.threadly.litesockets.Client;
+import org.threadly.litesockets.SocketExecuterInterface;
 import org.threadly.litesockets.utils.MergedByteBuffers;
 import org.threadly.util.ExceptionUtils;
 
@@ -44,7 +43,6 @@ public class SSLClient extends TCPClient {
   private final SettableListenableFuture<SSLSession> handshakeFuture = new SettableListenableFuture<SSLSession>(false);
   private final SSLEngine ssle;
   private final ByteBuffer encryptedReadBuffer;
-  private final AtomicReference<Watchdog> watchdog = new AtomicReference<Watchdog>(null);
 
   private volatile Reader sslReader;
   private ByteBuffer writeBuffer;
@@ -224,24 +222,6 @@ public class SSLClient extends TCPClient {
     return true;
   }
 
-<<<<<<< HEAD
-  protected Watchdog getWatchdog() {
-    Watchdog result = watchdog.get();
-    if (result == null) {
-      if (seb == null) {
-        result = new Watchdog(maxConnectionTime, true);
-      } else {
-        result = new Watchdog(seb.getThreadScheduler(), maxConnectionTime, true);
-      }
-      if (! watchdog.compareAndSet(null, result)) {
-        return watchdog.get();
-      }
-    }
-    return result;
-  }
-
-=======
->>>>>>> origin/2.1.0-staging
   /**
    * <p>If doHandshake was set to false in the constructor you can start the handshake by calling this method.
    * The client will not start the handshake till its added to a SocketExecuter.  The future allows you to know
@@ -252,8 +232,6 @@ public class SSLClient extends TCPClient {
    */
   public ListenableFuture<SSLSession> doHandShake() {
     if(startedHandshake.compareAndSet(false, true)) {
-<<<<<<< HEAD
-      handshakeFuture = new SettableListenableFuture<SSLSession>();
       handshakeFuture.addCallback(new FutureCallback<SSLSession>() {
         @Override
         public void handleResult(SSLSession result) {
@@ -265,8 +243,6 @@ public class SSLClient extends TCPClient {
           close();
         }
       });
-=======
->>>>>>> origin/2.1.0-staging
       try {
         ssle.beginHandshake();
       } catch (SSLException e) {
@@ -275,42 +251,21 @@ public class SSLClient extends TCPClient {
       if(ssle.getHandshakeStatus() == NEED_WRAP) {
         writeForce(ByteBuffer.allocate(0));
       }
-<<<<<<< HEAD
-      getWatchdog().watch(handshakeFuture);
-=======
-      if(this.seb != null) {
-        seb.getThreadScheduler().schedule(new Runnable() {
-          @Override
-          public void run() {
-            if(! handshakeFuture.isDone() && 
-               handshakeFuture.setFailure(new TimeoutException("Timed out doing SSLHandshake!!!"))) {
-              close();
-            }
-          }}, maxConnectionTime);
+      if(watchdog != null) {
+        watchdog.watch(handshakeFuture);
       }
->>>>>>> origin/2.1.0-staging
     }
     return handshakeFuture;
   }
 
-<<<<<<< HEAD
-=======
   @Override
   protected void setClientsSocketExecuter(SocketExecuterInterface sei) {
     super.setClientsSocketExecuter(sei);
-    if(startedHandshake.get() && !handshakeFuture.isDone()) {
-      sei.getThreadScheduler().schedule(new Runnable() {
-        @Override
-        public void run() {
-          if(! handshakeFuture.isDone() && 
-             handshakeFuture.setFailure(new TimeoutException("Timed out doing SSLHandshake!!!"))) {
-            close();
-          }
-        }}, maxConnectionTime);
+    if(startedHandshake.get() && ! handshakeFuture.isDone()) {
+      watchdog.watch(handshakeFuture);
     }
   }
 
->>>>>>> origin/2.1.0-staging
   private void runTasks() {
     SSLEngineResult.HandshakeStatus hs = ssle.getHandshakeStatus();
     while(hs == NEED_TASK) {
