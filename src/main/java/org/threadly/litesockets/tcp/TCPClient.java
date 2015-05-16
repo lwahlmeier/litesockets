@@ -3,6 +3,7 @@ package org.threadly.litesockets.tcp;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SocketChannel;
@@ -26,11 +27,11 @@ import org.threadly.util.Clock;
  */
 public class TCPClient extends Client {
   /**
-   * The default SocketConnection time out (10 seconds)
+   * The default SocketConnection time out (10 seconds).
    */
   public static final int DEFAULT_SOCKET_TIMEOUT = 10000;
   /**
-   * Default max buffer size (64k).  Read and write buffers are independent of eachother.
+   * Default max buffer size (64k).  Read and write buffers are independent of each other.
    */
   public static final int DEFAULT_MAX_BUFFER_SIZE = 64*1024;
   /**
@@ -42,6 +43,9 @@ public class TCPClient extends Client {
    */
   public static final int NEW_READ_BUFFER_SIZE = 64*1024;
   
+  public static final int MIN_WRITE_BUFFER_SIZE = 8192;
+  public static final int MAX_COMBINED_WRITE_BUFFER_SIZE = 65536;
+  
 
   private final MergedByteBuffers readBuffers = new MergedByteBuffers();
   private final MergedByteBuffers writeBuffers = new MergedByteBuffers();
@@ -50,6 +54,7 @@ public class TCPClient extends Client {
   protected final long startTime = Clock.lastKnownForwardProgressingMillis();
   protected final int maxConnectionTime;
   protected final AtomicBoolean startedConnection = new AtomicBoolean(false);
+  protected final SettableListenableFuture<Boolean> connectionFuture = new SettableListenableFuture<Boolean>(false);
 
   protected volatile SocketChannel channel;
   protected volatile int maxBufferSize = DEFAULT_MAX_BUFFER_SIZE;
@@ -61,11 +66,11 @@ public class TCPClient extends Client {
   protected volatile Executor cexec;
   protected volatile SocketExecuterInterface seb;
   protected volatile long connectExpiresAt = -1;
-  protected SettableListenableFuture<Boolean> connectionFuture = new SettableListenableFuture<Boolean>();
   protected ClientByteStats stats = new ClientByteStats();
   protected AtomicBoolean closed = new AtomicBoolean(false);
+  protected final SocketAddress remoteAddress;
 
-  private ByteBuffer currentWriteBuffer;
+  private volatile ByteBuffer currentWriteBuffer = ByteBuffer.allocate(0);
   private ByteBuffer readByteBuffer = ByteBuffer.allocate(NEW_READ_BUFFER_SIZE);
 
 
@@ -92,6 +97,7 @@ public class TCPClient extends Client {
     maxConnectionTime = timeout;
     this.host = host;
     this.port = port;
+    remoteAddress = new InetSocketAddress(host, port);
   }
 
   /**
@@ -106,12 +112,14 @@ public class TCPClient extends Client {
     if(! channel.isOpen()) {
       throw new ClosedChannelException();
     }
+    connectionFuture.setResult(true);
     host = channel.socket().getInetAddress().getHostAddress();
     port = channel.socket().getPort();
     if(channel.isBlocking()) {
       channel.configureBlocking(false);
     }
     this.channel = channel;
+    remoteAddress = channel.socket().getRemoteSocketAddress();
     startedConnection.set(true);
   }
   
@@ -129,14 +137,14 @@ public class TCPClient extends Client {
   @Override
   public ListenableFuture<Boolean> connect(){
     if(startedConnection.compareAndSet(false, true)) {
-      connectionFuture = new SettableListenableFuture<Boolean>();
       try {
-      channel = SocketChannel.open();
-      channel.configureBlocking(false);
-      channel.connect(new InetSocketAddress(host, port));
-      connectExpiresAt = maxConnectionTime + Clock.lastKnownForwardProgressingMillis();
+        channel = SocketChannel.open();
+        channel.configureBlocking(false);
+        channel.connect(new InetSocketAddress(host, port));
+        connectExpiresAt = maxConnectionTime + Clock.lastKnownForwardProgressingMillis();
       } catch (Exception e) {
         connectionFuture.setFailure(e);
+        close();
       }
     }
     return connectionFuture;
@@ -144,29 +152,26 @@ public class TCPClient extends Client {
   
   @Override
   protected void setConnectionStatus(Throwable t) {
-    if(!connectionFuture.isDone()) {
-      if(t != null) {
-        connectionFuture.setFailure(t);
-      } else {
-        connectionFuture.setResult(true);
+    if(t != null) {
+      if(connectionFuture.setFailure(t)) {
+        close();
       }
+    } else {
+      connectionFuture.setResult(true);
     }
   }
   
-
   @Override
   public boolean hasConnectionTimedOut() {
     if(! startedConnection.get()) {
       return false;
     }
-    System.out.println(Clock.lastKnownForwardProgressingMillis()+":"+connectExpiresAt);
     if(channel.isConnected()) {
       return false;
     }
     return Clock.lastKnownForwardProgressingMillis() > connectExpiresAt; 
   }
   
-
   @Override
   public int getTimeout() {
     return maxConnectionTime;
@@ -217,7 +222,6 @@ public class TCPClient extends Client {
     }
   }
 
-
   @Override
   public Reader getReader() {
     return reader;
@@ -255,7 +259,7 @@ public class TCPClient extends Client {
 
   @Override
   protected boolean canWrite() {
-    if(writeBuffers.remaining() > 0) {
+    if(writeBuffers.remaining() > 0 || currentWriteBuffer.remaining() > 0) {
       return true;
     }
     return false;
@@ -276,7 +280,7 @@ public class TCPClient extends Client {
 
   @Override
   public int getWriteBufferSize() {
-    return this.writeBuffers.remaining();
+    return this.writeBuffers.remaining() + currentWriteBuffer.remaining();
   }
 
   @Override
@@ -393,17 +397,17 @@ public class TCPClient extends Client {
 
   @Override
   protected ByteBuffer getWriteBuffer() {
-    if(currentWriteBuffer != null && currentWriteBuffer.remaining() == 0) {
+    if(currentWriteBuffer.remaining() != 0) {
       return currentWriteBuffer;
     }
     synchronized(writeBuffers) {
       //This is to keep from doing a ton of little writes if we can.  We will try to 
       //do at least 8k at a time, and up to 65k if we are already having to combine buffers
-      if(writeBuffers.nextPopSize() < 65536/8 && writeBuffers.remaining() > writeBuffers.nextPopSize()) {
-        if(writeBuffers.remaining() < 65536) {
+      if(writeBuffers.nextPopSize() < MIN_WRITE_BUFFER_SIZE && writeBuffers.remaining() > writeBuffers.nextPopSize()) {
+        if(writeBuffers.remaining() < MAX_COMBINED_WRITE_BUFFER_SIZE) {
           currentWriteBuffer = writeBuffers.pull(writeBuffers.remaining());
         } else {
-          currentWriteBuffer = writeBuffers.pull(65536);
+          currentWriteBuffer = writeBuffers.pull(MAX_COMBINED_WRITE_BUFFER_SIZE);
         }
       } else {
         currentWriteBuffer = writeBuffers.pop();
@@ -412,18 +416,20 @@ public class TCPClient extends Client {
     return currentWriteBuffer;
   }
 
-
   @Override
   protected void reduceWrite(int size) {
     synchronized(writeBuffers) {
       stats.addWrite(size);
       if(! currentWriteBuffer.hasRemaining()) {
-        currentWriteBuffer = null;
+        currentWriteBuffer = ByteBuffer.allocate(0);
       }
       writeBuffers.notifyAll();
     }
   }
   
+  /**
+   * Implementation of the SimpleByteStats.
+   */
   private static class ClientByteStats extends SimpleByteStats {
     public ClientByteStats() {
       super();
@@ -442,4 +448,21 @@ public class TCPClient extends Client {
     }
   }
 
+  @Override
+  public SocketAddress getRemoteSocketAddress() {
+    return remoteAddress;
+  }
+
+  @Override
+  public SocketAddress getLocalSocketAddress() {
+    if(this.channel != null) {
+      return channel.socket().getLocalSocketAddress();
+    }
+    return null;
+  }
+  
+  @Override
+  public String toString() {
+    return "TCPClient:FROM:"+getLocalSocketAddress()+":TO:"+getRemoteSocketAddress();
+  }
 }

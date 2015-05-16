@@ -14,10 +14,13 @@ import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 
-import org.threadly.concurrent.AbstractService;
 import org.threadly.concurrent.NoThreadScheduler;
 import org.threadly.concurrent.SchedulerServiceInterface;
+import org.threadly.litesockets.ThreadedSocketExecuter.SocketExecuterByteStats;
+import org.threadly.litesockets.utils.SimpleByteStats;
+import org.threadly.util.AbstractService;
 import org.threadly.util.ArgumentVerifier;
+import org.threadly.util.ExceptionUtils;
 
 /**
  * <p>The NoThreadSocketExecuter is a simpler implementation of a {@link SocketExecuterInterface} 
@@ -36,21 +39,20 @@ import org.threadly.util.ArgumentVerifier;
  * {@link #removeServer(Server)} can be called from other threads safely.</p>
  * 
  * @author lwahlmeier
- *
  */
 public class NoThreadSocketExecuter extends AbstractService implements SocketExecuterInterface {
-  private final NoThreadScheduler scheduler = new NoThreadScheduler(false);
+  private final NoThreadScheduler scheduler = new NoThreadScheduler();
   private final ConcurrentHashMap<SocketChannel, Client> clients = new ConcurrentHashMap<SocketChannel, Client>();
   private final ConcurrentHashMap<SelectableChannel, Server> servers = new ConcurrentHashMap<SelectableChannel, Server>();
-  private Selector selector;
+  private final SocketExecuterByteStats stats = new SocketExecuterByteStats();
+  private volatile Selector selector;
 
   /**
    * Constructs a NoThreadSocketExecuter.  {@link #start()} must still be called before using it.
-   * 
    */
   public NoThreadSocketExecuter() {
   }
-  
+
   /**
    * This is used to wakeup the {@link Selector} assuming it was called with a timeout on it.
    * Most all methods in this class that need to do a wakeup do it automatically, but
@@ -73,11 +75,11 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
         Client nc = clients.putIfAbsent(client.getChannel(), client);
         if(nc == null) {
           if(client.canRead() && client.canWrite()) {
-            scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_READ|SelectionKey.OP_WRITE));
+            scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_READ|SelectionKey.OP_WRITE));
           } else if(client.canRead() ) {
-            scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_READ));
+            scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_READ));
           } else if(client.canWrite()) {
-            scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_WRITE));  
+            scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE));  
           }
           selector.wakeup();
         }
@@ -87,18 +89,15 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
         }
         Client nc = clients.putIfAbsent(client.getChannel(), client);
         if(nc == null) {
-          scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_CONNECT));
+          scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_CONNECT));
           scheduler.schedule(new Runnable() {
             @Override
             public void run() {
               if(client.hasConnectionTimedOut()) {
-                SelectionKey sk = client.getChannel().keyFor(selector);
-                if(sk != null) {
-                  sk.cancel();
-                }
-                removeClient(client);
-                client.close();
                 client.setConnectionStatus(new TimeoutException("Timed out while connecting!"));
+                if(client.isClosed() && clients.containsKey(client)) {
+                  removeClient(client);
+                }
               }
             }}, client.getTimeout()+10);
           selector.wakeup();
@@ -115,7 +114,8 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
       if(c != null) {
         SelectionKey sk = client.getChannel().keyFor(selector);
         if(sk != null) {
-          sk.cancel();
+          scheduler.execute(new RemoveFromSelector(client.getChannel(), selector));
+          selector.wakeup();
         }
       }
     }
@@ -129,26 +129,12 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
       if(sn == null) {
         server.setSocketExecuter(this);
         server.setThreadExecutor(scheduler);
-        scheduler.execute(new Runnable() {
-          @Override
-          public void run() {
-            SelectionKey key = server.getSelectableChannel().keyFor(selector);
-            if(key == null) {
-              try {
-                if(server.getServerType() == WireProtocol.TCP) {
-                  server.getSelectableChannel().register(selector, SelectionKey.OP_ACCEPT);
-                } else if(server.getServerType() == WireProtocol.UDP) {
-                  server.getSelectableChannel().register(selector, SelectionKey.OP_READ);
-                }
-                selector.wakeup();
-              } catch (ClosedChannelException e) {
-                removeServer(server);
-                server.close();
-              } catch(ClosedSelectorException e) {
-                
-              }
-            }
-          }});
+        if(server.getServerType() == WireProtocol.TCP) {
+          scheduler.execute(new AddToSelector(server.getSelectableChannel(), selector, SelectionKey.OP_ACCEPT));
+        } else if (server.getServerType() == WireProtocol.UDP) {
+          scheduler.execute(new AddToSelector(server.getSelectableChannel(), selector, SelectionKey.OP_READ));
+        }
+        selector.wakeup();
       }
     }
   }
@@ -157,8 +143,11 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
   public void removeServer(Server server) {
     ArgumentVerifier.assertNotNull(server, "Server");
     if(isRunning()) {
-      servers.remove(server.getSelectableChannel());
-      selector.wakeup();
+      Server s = servers.remove(server.getSelectableChannel());
+      if(s != null) {
+        scheduler.execute(new RemoveFromSelector(server.getSelectableChannel(), selector));
+        selector.wakeup();
+      }
     }
   }
 
@@ -167,9 +156,9 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
     ArgumentVerifier.assertNotNull(client, "Client");
     if(isRunning() && clients.containsKey(client.getChannel())) {
       if(client.canRead()) {
-        scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_WRITE|SelectionKey.OP_READ));
+        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE|SelectionKey.OP_READ));
       } else {
-        scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_WRITE));
+        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE));
       }
       selector.wakeup();
     }
@@ -180,9 +169,9 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
     ArgumentVerifier.assertNotNull(client, "Client");
     if(isRunning() && clients.containsKey(client.getChannel())) {
       if(client.canWrite()) {
-        scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_WRITE|SelectionKey.OP_READ));
+        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE|SelectionKey.OP_READ));
       } else {
-        scheduler.execute(new AddToSelector(client, selector, SelectionKey.OP_READ));
+        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_READ));
       }
       selector.wakeup();
     }
@@ -217,12 +206,16 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
     scheduler.clearTasks();
     selector.wakeup();
     selector.wakeup();
-    try {
-      if(selector != null && selector.isOpen()) {
-        selector.close();
-      }
-    } catch (IOException e) {
-
+    if(selector != null && selector.isOpen()) {
+      scheduler.execute(new Runnable() {
+        @Override
+        public void run() {
+          try {
+            selector.close();
+          } catch (Exception e) {
+            ExceptionUtils.handleException(e);
+          }
+        }});
     }
     clients.clear();
     servers.clear();
@@ -238,7 +231,7 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
   public void select() {
     select(0);
   }
-  
+
   /**
    * This is the same as the {@link #select()} but it allows you to set a delay.
    * This delay is the time to wait for socket operations to happen.  It will
@@ -251,11 +244,7 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
   public void select(int delay) {
     ArgumentVerifier.assertNotNegative(delay, "delay");
     if(isRunning()) {
-      try {
-        scheduler.tick(null);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
+      scheduler.tick(null);
       try {
         if(delay == 0) {
           selector.selectNow();
@@ -294,21 +283,18 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
               SocketChannel sc = (SocketChannel)key.channel();
               doWrite(sc);
             }
-
           } catch(CancelledKeyException e) {
-            //Key could be cancelled at any point...
+            //Key could be cancelled at any point, we dont really care about it.
           }
         }
       } catch (IOException e) {
-
+        //There is really nothing to do here but try again, usually this is because of shutdown.
       } catch(ClosedSelectorException e) {
-        
+        //We do nothing here because the next loop should not happen now.
+      } catch (NullPointerException e) {
+        //There is a bug in some JVMs around this where the select() can throw an NPE from native code.
       }
-      try {
-        scheduler.tick(null);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
+      scheduler.tick(null);
     }
   }
 
@@ -337,6 +323,7 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
           removeClient(client);
           client.close();
         } else if( read > 0) {
+          stats.addRead(read);
           readByteBuffer.position(origPos);
           ByteBuffer resultBuffer = readByteBuffer.slice();
           readByteBuffer.position(origPos+read);
@@ -355,11 +342,10 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
       }
     }else {
       final Server server = servers.get(sc);
-      if(server.getServerType() == WireProtocol.UDP) {
+      if(server != null && server.getServerType() == WireProtocol.UDP) {
         server.acceptChannel((DatagramChannel)server.getSelectableChannel());
       }
     }
-
   }
 
   private void doWrite(SocketChannel sc) {
@@ -367,6 +353,7 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
     if(client != null) {
       try {
         int writeSize = sc.write(client.getWriteBuffer());
+        stats.addWrite(writeSize);
         client.reduceWrite(writeSize);
         if(! client.canWrite()  && ! client.canRead()) {
           client.getChannel().register(selector, 0);
@@ -378,17 +365,53 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
         client.close();
       }
     }
-
   }
 
+  private void flushOutSelector() {
+    try {
+      selector.selectNow();
+    } catch (IOException e) {
+    }
+  }
+
+  /**
+   * This class is a helper runnable to generically remove SelectableChannels from a selector.
+   * 
+   *
+   */
+  private class RemoveFromSelector implements Runnable {
+    SelectableChannel localChannel;
+    Selector localSelector;
+
+    public RemoveFromSelector(SelectableChannel channel, Selector selector) {
+      localChannel = channel;
+      localSelector = selector;
+    }
+
+    @Override
+    public void run() {
+      if(isRunning()) {
+        SelectionKey sk = localChannel.keyFor(localSelector);
+        if(sk != null) {
+          sk.cancel();
+          flushOutSelector();
+        }
+      }
+    }
+  }
+
+  /**
+   * This class is a helper runnable to generically add SelectableChannels to a selector for certain operations.
+   * 
+   */
   private class AddToSelector implements Runnable {
-    Client local_client;
-    Selector local_selector;
+    SelectableChannel localChannel;
+    Selector localSelector;
     int registerType;
 
-    public AddToSelector(Client client, Selector selector, int registerType) {
-      local_client = client;
-      local_selector = selector;
+    public AddToSelector(SelectableChannel channel, Selector selector, int registerType) {
+      localChannel = channel;
+      localSelector = selector;
       this.registerType = registerType;
     }
 
@@ -396,14 +419,31 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
     public void run() {
       if(isRunning()) {
         try {
-          local_client.getChannel().register(local_selector, registerType);
+          flushOutSelector();
+          localChannel.register(localSelector, registerType);
         } catch (ClosedChannelException e) {
-          removeClient(local_client);
-          local_client.close();
+          removeChannel();
         } catch (CancelledKeyException e) {
-          removeClient(local_client);
+
         }
       }
     }
+
+    private void removeChannel() {
+      Client client = clients.remove(localChannel);
+      Server server = servers.remove(localChannel);
+      if(client != null) {
+        removeClient(client);
+        client.close();
+      } else if (server != null){
+        removeServer(server);
+        server.close();
+      }
+    }
+  }
+
+  @Override
+  public SimpleByteStats getStats() {
+    return stats;
   }
 }

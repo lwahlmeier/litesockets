@@ -1,6 +1,7 @@
 package org.threadly.litesockets;
 
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.Executor;
@@ -247,7 +248,7 @@ public abstract class Client {
    * </p>
    * 
    * @param bb the {@link ByteBuffer} to write.
-   * @throws {@link InterruptedException} This happens only if the thread that is blocked is interrupted while waiting. 
+   * @throws InterruptedException This happens only if the thread that is blocked is interrupted while waiting. 
    */
   public abstract void writeBlocking(ByteBuffer bb) throws InterruptedException;
   
@@ -324,6 +325,19 @@ public abstract class Client {
    * called (if set) once all reads are done.</p>
    */
   public abstract void close();
+  
+  /**
+   * 
+   * @return the remote {@link SocketAddress} this client is connected to.
+   */
+  public abstract SocketAddress getRemoteSocketAddress();
+  
+  
+  /**
+   * 
+   * @return the local {@link SocketAddress} this client is using.
+   */
+  public abstract SocketAddress getLocalSocketAddress();
   
   
   /**

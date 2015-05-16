@@ -18,6 +18,17 @@ import org.threadly.litesockets.utils.SimpleByteStats;
 import org.threadly.util.ArgumentVerifier;
 import org.threadly.util.Clock;
 
+/**
+ *  This is the UDPClient for litesockets.  The UDPClient is a little special as it is
+ *  not actually a selectable client.  The Server actually does all the "Reading" for the socket. 
+ *  
+ *  Since all UDP connections must has a bound port all UDPClients in litesockets are tight to a UDPServer.
+ *  The UDPClient is basically a unique host that is sending messages to the open UDP socket.
+ *  
+ *  Another unique aspect to UDPClients is there writing.  When any form of "write" is called it is immediately done
+ *  on the socket.
+ *  
+ */
 public class UDPClient extends Client {
   public static final int DEFAULT_MAX_BUFFER_SIZE = 64*1024;
   public static final int MIN_READ= 4*1024;
@@ -26,21 +37,21 @@ public class UDPClient extends Client {
 
   protected final long startTime = Clock.lastKnownForwardProgressingMillis();
   private final MergedByteBuffers readBuffers = new MergedByteBuffers();
-  protected final SocketAddress sa;
+  protected final SocketAddress remoteAddress;
   protected final UDPServer udpServer;
 
   protected int maxBufferSize = DEFAULT_MAX_BUFFER_SIZE;
   protected int minAllowedReadBuffer = MIN_READ;
-  private ByteBuffer readByteBuffer = ByteBuffer.allocate(maxBufferSize*2);
 
   protected volatile Closer closer;
   protected volatile Reader reader;
   protected volatile Executor executer;
   protected volatile SocketExecuterInterface sei;
   protected AtomicBoolean closed = new AtomicBoolean(false);
+
   
   protected UDPClient(SocketAddress sa, UDPServer server) {
-    this.sa = sa;
+    this.remoteAddress = sa;
     udpServer = server;
   }
   
@@ -49,7 +60,7 @@ public class UDPClient extends Client {
     if(o instanceof UDPClient) {
       if(hashCode() == o.hashCode()) {
         UDPClient u = (UDPClient)o;
-        if(u.sa.equals(this.sa) && u.udpServer.getSelectableChannel().equals(udpServer.getSelectableChannel())) {
+        if(u.remoteAddress.equals(this.remoteAddress) && u.udpServer.getSelectableChannel().equals(udpServer.getSelectableChannel())) {
           return true;
         }
       }
@@ -59,7 +70,7 @@ public class UDPClient extends Client {
   
   @Override
   public int hashCode() {
-    return sa.hashCode() * udpServer.getSelectableChannel().hashCode();
+    return remoteAddress.hashCode() * udpServer.getSelectableChannel().hashCode();
   }
   
   @Override
@@ -122,7 +133,7 @@ public class UDPClient extends Client {
     stats.addWrite(bb.remaining());
     if(!closed.get()) {
       try {
-        udpServer.channel.send(bb, sa);
+        udpServer.channel.send(bb, remoteAddress);
       } catch (IOException e) {
       }
     }
@@ -266,8 +277,28 @@ public class UDPClient extends Client {
   @Override
   protected void setConnectionStatus(Throwable t) {
   }
-
   
+  @Override
+  public SocketAddress getRemoteSocketAddress() {
+    return remoteAddress;
+  }
+
+  @Override
+  public SocketAddress getLocalSocketAddress() {
+    if(this.udpServer.channel != null) {
+      return udpServer.channel.socket().getLocalSocketAddress();
+    }
+    return null;
+  }
+  
+  @Override
+  public String toString() {
+    return "UDPClient:FROM:"+getLocalSocketAddress()+":TO:"+getRemoteSocketAddress();
+  }
+
+  /**
+   * Implementation of the SimpleByteStats.
+   */
   private static class ClientByteStats extends SimpleByteStats {
     public ClientByteStats() {
       super();

@@ -1,6 +1,8 @@
 package org.threadly.litesockets;
 
 import org.threadly.concurrent.SimpleSchedulerInterface;
+import org.threadly.litesockets.utils.SimpleByteStats;
+import org.threadly.util.ServiceInterface;
 
 /**
  * This is the main Interface that Clients and Servers are added to, to run there socket operations.
@@ -9,7 +11,7 @@ import org.threadly.concurrent.SimpleSchedulerInterface;
  * @author lwahlmeier
  *
  */
-public interface SocketExecuterInterface {
+public interface SocketExecuterInterface extends ServiceInterface {
   /**
    * <p>Wire protocols supported by litesockets.  This is the protocol
    * used to communicate with. Depending on the protocol Implementors of the SocketExecuterInterface 
@@ -101,28 +103,11 @@ public interface SocketExecuterInterface {
   public SimpleSchedulerInterface getThreadScheduler();
   
   /**
-   * provided for {@link org.threadly.concurrent.AbstractService}
+   * <p>This will give you read and write stats for the SocketExecuter.  This will tell you information about
+   * the number of bytes sent/received by this SocketExecuter.</p>
+   * 
+   * @return a {@link SimpleByteStats} object to allow you to get the stats for this SocketExecuter.
    */
-  public void start();
+  public SimpleByteStats getStats();
   
-  /**
-   * provided for {@link org.threadly.concurrent.AbstractService}
-   */
-  public boolean startIfNotStarted();
-  
-  /**
-   * provided for {@link org.threadly.concurrent.AbstractService}
-   */
-  public void stop();
-  
-  /**
-   * provided for {@link org.threadly.concurrent.AbstractService}
-   */
-  public boolean stopIfRunning();
-  
-  /**
-   * provided for {@link org.threadly.concurrent.AbstractService}
-   */
-  public boolean isRunning();
-
 }

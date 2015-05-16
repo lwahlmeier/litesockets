@@ -15,13 +15,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 
-import org.threadly.concurrent.AbstractService;
 import org.threadly.concurrent.ConfigurableThreadFactory;
 import org.threadly.concurrent.KeyDistributedExecutor;
 import org.threadly.concurrent.ScheduledExecutorServiceWrapper;
 import org.threadly.concurrent.SimpleSchedulerInterface;
 import org.threadly.concurrent.SingleThreadScheduler;
+import org.threadly.litesockets.utils.SimpleByteStats;
+import org.threadly.util.AbstractService;
 import org.threadly.util.ArgumentVerifier;
+import org.threadly.util.Clock;
 
 
 /**
@@ -35,13 +37,17 @@ import org.threadly.util.ArgumentVerifier;
  *
  */
 public class ThreadedSocketExecuter extends AbstractService implements SocketExecuterInterface {
-  private final SingleThreadScheduler acceptScheduler = new SingleThreadScheduler(new ConfigurableThreadFactory("SocketAcceptor", false, true, Thread.currentThread().getPriority(), null, null));
-  private final SingleThreadScheduler readScheduler = new SingleThreadScheduler(new ConfigurableThreadFactory("SocketReader", false, true, Thread.currentThread().getPriority(), null, null));
-  private final SingleThreadScheduler writeScheduler = new SingleThreadScheduler(new ConfigurableThreadFactory("SocketWriter", false, true, Thread.currentThread().getPriority(), null, null));
+  private final SingleThreadScheduler acceptScheduler = 
+      new SingleThreadScheduler(new ConfigurableThreadFactory("SocketAcceptor", false, true, Thread.currentThread().getPriority(), null, null));
+  private final SingleThreadScheduler readScheduler = 
+      new SingleThreadScheduler(new ConfigurableThreadFactory("SocketReader", false, true, Thread.currentThread().getPriority(), null, null));
+  private final SingleThreadScheduler writeScheduler = 
+      new SingleThreadScheduler(new ConfigurableThreadFactory("SocketWriter", false, true, Thread.currentThread().getPriority(), null, null));
   private final KeyDistributedExecutor clientDistributer;
   private final SimpleSchedulerInterface schedulerPool;
   private final ConcurrentHashMap<SocketChannel, Client> clients = new ConcurrentHashMap<SocketChannel, Client>();
   private final ConcurrentHashMap<SelectableChannel, Server> servers = new ConcurrentHashMap<SelectableChannel, Server>();
+  private final SocketExecuterByteStats stats = new SocketExecuterByteStats();
 
   protected volatile long readThreadID = 0;
   protected Selector readSelector;
@@ -59,12 +65,13 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
    * thread pool.</p>
    */
   public ThreadedSocketExecuter() {
-    schedulerPool = new SingleThreadScheduler(new ConfigurableThreadFactory("SocketClientThread", false, true, Thread.currentThread().getPriority(), null, null));
+    schedulerPool = new SingleThreadScheduler(
+        new ConfigurableThreadFactory("SocketClientThread", false, true, Thread.currentThread().getPriority(), null, null));
     clientDistributer = new KeyDistributedExecutor(schedulerPool);
   }
 
   /**
-   * <p>This is provided to allow people to use java's generic threadpool scheduler {@link ScheduledExecutorService} </p>
+   * <p>This is provided to allow people to use java's generic threadpool scheduler {@link ScheduledExecutorService}.</p>
    * 
    * @param exec The {@link ScheduledExecutorService} to be used for client/server callbacks.
    */
@@ -116,15 +123,12 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
             @Override
             public void run() {
               if(client.hasConnectionTimedOut()) {
-                SelectionKey sk = client.getChannel().keyFor(readSelector);
-                if(sk != null) {
-                  sk.cancel();
-                }
-                removeClient(client);
-                client.close();
                 client.setConnectionStatus(new TimeoutException("Timed out while connecting!"));
+                if(client.isClosed() && clients.containsKey(client)) {
+                  removeClient(client);
+                }
               }
-            }}, client.getTimeout()+100);
+            }}, client.getTimeout() + Clock.AUTOMATIC_UPDATE_FREQUENCY_IN_MS);
         }
       }
     }
@@ -140,9 +144,11 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
         SelectionKey sk2 = client.getChannel().keyFor(writeSelector);
         if(sk != null) {
           sk.cancel();
+          readSelector.wakeup();
         }
         if(sk2 != null) {
           sk2.cancel();
+          writeSelector.wakeup();
         }
       }
     }
@@ -212,7 +218,6 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
-
   }
 
   @Override
@@ -265,7 +270,6 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
   public int getServerCount() {
     return servers.size();
   }
-
   
   /**
    * <p>This is used to figure out if the current used thread is the SocketExecuters ReadThread.
@@ -282,6 +286,9 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
     return true;
   }
 
+  /**
+   * Runnable for the Acceptor thread.  This runs the acceptSelector on the AcceptorThread. 
+   */
   private class AcceptRunner implements Runnable {
     @Override
     public void run() {
@@ -324,6 +331,9 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
     }
   }
 
+  /**
+   * Runnable for the Read thread.  This runs the readSelector on the ReadThread. 
+   */
   private class ReadRunner implements Runnable {
     @Override
     public void run() {
@@ -348,7 +358,6 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
                     }
                   }
                 } catch(IOException e) {
-                  e.printStackTrace();
                   client.setConnectionStatus(e);
                   removeClient(client);
                   client.close();
@@ -363,12 +372,12 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
                     removeClient(client);
                     client.close();
                   } else if( read > 0){
+                    stats.addRead(read);
                     readByteBuffer.position(origPos);
                     ByteBuffer resultBuffer = readByteBuffer.slice();
                     readByteBuffer.position(origPos+read);
                     resultBuffer.limit(read);
                     client.addReadBuffer(resultBuffer.asReadOnlyBuffer());
-                    //client.callReader();
                     if(! client.canRead()) {
                       client.getChannel().register(readSelector, 0);
                     }
@@ -391,6 +400,9 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
     }
   }
 
+  /**
+   * Runnable for the Write thread.  This runs the writeSelector on the WriteThread. 
+   */
   private class WriteRunner implements Runnable {
     @Override
     public void run() {
@@ -405,6 +417,7 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
               if(client != null) {
                 try {
                   int writeSize = sc.write(client.getWriteBuffer());
+                  stats.addWrite(writeSize);
                   client.reduceWrite(writeSize);
                   if(! client.canWrite()) {
                     client.getChannel().register(writeSelector, 0);
@@ -415,7 +428,6 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
                 }
               }
             }
-
           }
         } catch (IOException e) {
           stopIfRunning();
@@ -428,14 +440,18 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
     }
   }
 
+  /**
+   * This class is a helper runnable to generically add SelectableChannels to a selector for certain operations.
+   * 
+   */
   private class AddToSelector implements Runnable {
-    Client local_client;
-    Selector local_selector;
+    Client localClient;
+    Selector localSelector;
     int registerType;
 
     public AddToSelector(Client client, Selector selector, int registerType) {
-      local_client = client;
-      local_selector = selector;
+      localClient = client;
+      localSelector = selector;
       this.registerType = registerType;
     }
 
@@ -443,12 +459,12 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
     public void run() {
       if(isRunning()) {
         try {
-          local_client.getChannel().register(local_selector, registerType);
+          localClient.getChannel().register(localSelector, registerType);
         } catch (ClosedChannelException e) {
-          removeClient(local_client);
-          local_client.close();
+          removeClient(localClient);
+          localClient.close();
         } catch (CancelledKeyException e) {
-          removeClient(local_client);
+          removeClient(localClient);
         }
       }
     }
@@ -457,5 +473,25 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
   @Override
   public SimpleSchedulerInterface getThreadScheduler() {
     return schedulerPool;
+  }
+
+  @Override
+  public SimpleByteStats getStats() {
+    return stats;
+  }
+  
+  /**
+   * Implementation of the SimpleByteStats.
+   */
+  protected static class SocketExecuterByteStats extends SimpleByteStats {
+    @Override
+    protected void addWrite(int size) {
+      super.addWrite(size);
+    }
+    
+    @Override
+    protected void addRead(int size) {
+      super.addRead(size);
+    }
   }
 }

@@ -5,7 +5,6 @@ import static javax.net.ssl.SSLEngineResult.HandshakeStatus.NEED_TASK;
 import static javax.net.ssl.SSLEngineResult.HandshakeStatus.NEED_WRAP;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -24,7 +23,6 @@ import org.threadly.concurrent.future.SettableListenableFuture;
 import org.threadly.concurrent.future.Watchdog;
 import org.threadly.litesockets.Client;
 import org.threadly.litesockets.utils.MergedByteBuffers;
-import org.threadly.util.Clock;
 import org.threadly.util.ExceptionUtils;
 
 /**
@@ -32,27 +30,28 @@ import org.threadly.util.ExceptionUtils;
  * By default it will not check the servers certs and will only do TLS connections.
  * 
  * @author lwahlmeier
- *
  */
 public class SSLClient extends TCPClient {
+  public static final int EXTRA_BUFFER_AMOUNT = 50;
+  public static final int PREALLOCATE_BUFFER_MULTIPLIER = 3;
+
   private final AtomicBoolean finishedHandshake = new AtomicBoolean(false);
   private final AtomicBoolean startedHandshake = new AtomicBoolean(false);
   private final boolean connectHandshake;
   private final MergedByteBuffers tmpWriteBuffers = new MergedByteBuffers();
   private final MergedByteBuffers decryptedReadList = new MergedByteBuffers();
   private final Reader classReader = new SSLReader();
+  private final SettableListenableFuture<SSLSession> handshakeFuture = new SettableListenableFuture<SSLSession>(false);
   private final SSLEngine ssle;
   private final ByteBuffer encryptedReadBuffer;
   private final AtomicReference<Watchdog> watchdog = new AtomicReference<Watchdog>(null);
 
   private volatile Reader sslReader;
   private ByteBuffer writeBuffer;
-  private SettableListenableFuture<SSLSession> handshakeFuture = new SettableListenableFuture<SSLSession>();
   
   private ByteBuffer decryptedReadBuffer;
   
    
-
   /**
    * <p>This is a simple SSLConstructor.  It uses the default socket timeout, and very insecure cert
    * checking.  This setup to generally connect to any server, and does not validate anything.</p>
@@ -61,9 +60,7 @@ public class SSLClient extends TCPClient {
    *  
    * @param host The host or IP to connect to.
    * @param port The port on the host to connect to.
-   * @throws IOException An IOException is thrown if there is a failure to connect for any reason.
    */
-
   public SSLClient(String host, int port) {
     this(host, port, SSLUtils.OPEN_SSL_CTX.createSSLEngine(host, port));
   }
@@ -77,7 +74,6 @@ public class SSLClient extends TCPClient {
    * @param host The host or IP to connect to.
    * @param port The port on the host to connect to.
    * @param ssle The SSLEngine to use for the connection.
-   * @throws IOException An IOException is thrown if there is a failure to connect for any reason.
    */
   public SSLClient(String host, int port, SSLEngine ssle) {
     this(host, port, ssle, TCPClient.DEFAULT_SOCKET_TIMEOUT);
@@ -94,7 +90,6 @@ public class SSLClient extends TCPClient {
    * @param port The port on the host to connect to.
    * @param ssle The SSLEngine to use for the connection.
    * @param timeout This is the connection timeout.  It is used for the actual connection timeout and separately for the SSLHandshake.
-   * @throws IOException An IOException is thrown if there is a failure to connect for any reason.
    */
   public SSLClient(String host, int port, SSLEngine ssle, int timeout){
     this(host, port, ssle, TCPClient.DEFAULT_SOCKET_TIMEOUT, true);
@@ -111,7 +106,6 @@ public class SSLClient extends TCPClient {
    * @param ssle The SSLEngine to use for the connection.
    * @param timeout This is the connection timeout.  It is used for the actual connection timeout and separately for the SSLHandshake.
    * @param doHandshake This allows you to delay the handshake till a later negotiated time.
-   * @throws IOException An IOException is thrown if there is a failure to connect for any reason.
    */
   public SSLClient(String host, int port, SSLEngine ssle, int timeout, boolean doHandshake){
     super(host, port, timeout);
@@ -119,7 +113,7 @@ public class SSLClient extends TCPClient {
     ssle.setUseClientMode(true);
     connectHandshake = doHandshake;
     super.setReader(classReader);
-    encryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()+50);
+    encryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()+EXTRA_BUFFER_AMOUNT);
   }
 
   /**
@@ -158,7 +152,7 @@ public class SSLClient extends TCPClient {
       doHandShake();
     }
     super.setReader(classReader);
-    encryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()+50);
+    encryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()+EXTRA_BUFFER_AMOUNT);
   }
 
   /**
@@ -192,31 +186,29 @@ public class SSLClient extends TCPClient {
       doHandShake();
     }
     super.setReader(classReader);
-    encryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()+50);
+    encryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()+EXTRA_BUFFER_AMOUNT);
   }
   
   @Override
   public ListenableFuture<Boolean> connect(){
-    if(startedConnection.compareAndSet(false, true)) {
-      connectionFuture = new SettableListenableFuture<Boolean>();
-      try {
-      channel = SocketChannel.open();
-      channel.configureBlocking(false);
-      channel.connect(new InetSocketAddress(host, port));
-      connectExpiresAt = maxConnectionTime + Clock.lastKnownForwardProgressingMillis(); 
-      if(connectHandshake) {
-        doHandShake();
-      }
-      } catch(Exception e) {
-        connectionFuture.setFailure(e);
-      }
+    super.connect();
+    if(connectHandshake) {
+      doHandShake();
+      connectionFuture.addCallback(new FutureCallback<Boolean>() {
+        @Override
+        public void handleResult(Boolean result) {
+        }
+        @Override
+        public void handleFailure(Throwable t) {
+          handshakeFuture.setFailure(t);
+        }});
     }
     return connectionFuture;
   }
 
   private ByteBuffer getDecryptedByteBuffer() {
-    if(decryptedReadBuffer == null || decryptedReadBuffer.remaining() < ssle.getSession().getApplicationBufferSize()*1.5) {
-      decryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getApplicationBufferSize()*3);
+    if(decryptedReadBuffer == null || decryptedReadBuffer.remaining() < ssle.getSession().getApplicationBufferSize()+EXTRA_BUFFER_AMOUNT) {
+      decryptedReadBuffer = ByteBuffer.allocate(ssle.getSession().getApplicationBufferSize()*PREALLOCATE_BUFFER_MULTIPLIER);
     }
     return decryptedReadBuffer;
   }
@@ -232,6 +224,7 @@ public class SSLClient extends TCPClient {
     return true;
   }
 
+<<<<<<< HEAD
   protected Watchdog getWatchdog() {
     Watchdog result = watchdog.get();
     if (result == null) {
@@ -247,18 +240,19 @@ public class SSLClient extends TCPClient {
     return result;
   }
 
+=======
+>>>>>>> origin/2.1.0-staging
   /**
    * <p>If doHandshake was set to false in the constructor you can start the handshake by calling this method.
    * The client will not start the handshake till its added to a SocketExecuter.  The future allows you to know
    * when the handshake has finished if if there was an error.  While the handshake is processing all writes to the 
    * socket will queue.</p>
    * 
-   * 
-   * @return A listenable Future.  If a result was given it succeeded, if there is an error it failed.  The connection is closed on failures.
-   * @throws IOException
+   * @return A ListenableFuture.  If a result was given it succeeded, if there is an error it failed.  The connection is closed on failures.
    */
   public ListenableFuture<SSLSession> doHandShake() {
     if(startedHandshake.compareAndSet(false, true)) {
+<<<<<<< HEAD
       handshakeFuture = new SettableListenableFuture<SSLSession>();
       handshakeFuture.addCallback(new FutureCallback<SSLSession>() {
         @Override
@@ -271,6 +265,8 @@ public class SSLClient extends TCPClient {
           close();
         }
       });
+=======
+>>>>>>> origin/2.1.0-staging
       try {
         ssle.beginHandshake();
       } catch (SSLException e) {
@@ -279,11 +275,42 @@ public class SSLClient extends TCPClient {
       if(ssle.getHandshakeStatus() == NEED_WRAP) {
         writeForce(ByteBuffer.allocate(0));
       }
+<<<<<<< HEAD
       getWatchdog().watch(handshakeFuture);
+=======
+      if(this.seb != null) {
+        seb.getThreadScheduler().schedule(new Runnable() {
+          @Override
+          public void run() {
+            if(! handshakeFuture.isDone() && 
+               handshakeFuture.setFailure(new TimeoutException("Timed out doing SSLHandshake!!!"))) {
+              close();
+            }
+          }}, maxConnectionTime);
+      }
+>>>>>>> origin/2.1.0-staging
     }
     return handshakeFuture;
   }
 
+<<<<<<< HEAD
+=======
+  @Override
+  protected void setClientsSocketExecuter(SocketExecuterInterface sei) {
+    super.setClientsSocketExecuter(sei);
+    if(startedHandshake.get() && !handshakeFuture.isDone()) {
+      sei.getThreadScheduler().schedule(new Runnable() {
+        @Override
+        public void run() {
+          if(! handshakeFuture.isDone() && 
+             handshakeFuture.setFailure(new TimeoutException("Timed out doing SSLHandshake!!!"))) {
+            close();
+          }
+        }}, maxConnectionTime);
+    }
+  }
+
+>>>>>>> origin/2.1.0-staging
   private void runTasks() {
     SSLEngineResult.HandshakeStatus hs = ssle.getHandshakeStatus();
     while(hs == NEED_TASK) {
@@ -294,8 +321,8 @@ public class SSLClient extends TCPClient {
   }
 
   private ByteBuffer getAppWriteBuffer() {
-    if(this.writeBuffer == null || this.writeBuffer.remaining() < ssle.getSession().getPacketBufferSize()*1.5) {
-      this.writeBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()*3);
+    if(this.writeBuffer == null || this.writeBuffer.remaining() < ssle.getSession().getPacketBufferSize()+EXTRA_BUFFER_AMOUNT) {
+      this.writeBuffer = ByteBuffer.allocate(ssle.getSession().getPacketBufferSize()*PREALLOCATE_BUFFER_MULTIPLIER);
     }
     return writeBuffer;
   }
@@ -345,8 +372,8 @@ public class SSLClient extends TCPClient {
               super.writeForce(tmpBB);
             }
           } catch(Exception e) {
-            if(!handshakeFuture.isDone()) {
-              handshakeFuture.setFailure(e);
+            if(! handshakeFuture.isDone() && 
+               handshakeFuture.setFailure(e)) {
               this.close();
             }
             break;
@@ -355,9 +382,7 @@ public class SSLClient extends TCPClient {
         if(gotFinished) {
           if(finishedHandshake.compareAndSet(false, true)) {
             writeForce(ByteBuffer.allocate(0));
-            if(!handshakeFuture.isDone()) {
-              handshakeFuture.setResult(ssle.getSession());
-            }
+            handshakeFuture.setResult(ssle.getSession());
           }
         }
       }
@@ -379,16 +404,16 @@ public class SSLClient extends TCPClient {
   }
 
   private void doRead() {
-    MergedByteBuffers client_buffer = super.getRead();
+    MergedByteBuffers clientBuffer = super.getRead();
     if(this.startedHandshake.get()) {
       try {
-        while(client_buffer.remaining() > 0) {
-          if(client_buffer.remaining() > encryptedReadBuffer.remaining()) {
+        while(clientBuffer.remaining() > 0) {
+          if(clientBuffer.remaining() > encryptedReadBuffer.remaining()) {
             byte[] ba = new byte[encryptedReadBuffer.remaining()];
-            client_buffer.get(ba);
+            clientBuffer.get(ba);
             encryptedReadBuffer.put(ba);
           } else {
-            encryptedReadBuffer.put(client_buffer.pop());
+            encryptedReadBuffer.put(clientBuffer.pop());
           }
           while(encryptedReadBuffer.position() > 0) {
             encryptedReadBuffer.flip();
@@ -416,14 +441,12 @@ public class SSLClient extends TCPClient {
           }
         }
       } catch (SSLException e) {
-        if(!handshakeFuture.isDone()) {
-          handshakeFuture.setFailure(e);
-        }
+        handshakeFuture.setFailure(e);
         ExceptionUtils.handleException(e);
         this.close();
       }
     } else {
-      decryptedReadList.add(client_buffer);
+      decryptedReadList.add(clientBuffer);
       sslReader.onRead(this);
     }
   }
@@ -434,9 +457,7 @@ public class SSLClient extends TCPClient {
       synchronized(tmpWriteBuffers) {
         if(this.finishedHandshake.compareAndSet(false, true)){
           writeForce(ByteBuffer.allocate(0));
-          if(!handshakeFuture.isDone()) {
-            handshakeFuture.setResult(ssle.getSession());
-          }
+          handshakeFuture.setResult(ssle.getSession());
         }
       }
     } break;
@@ -456,6 +477,9 @@ public class SSLClient extends TCPClient {
     }
   }
   
+  /**
+   * Reader for SSLClient.  This is used to read from the TCPClient into the SSLClient. 
+   */
   private class SSLReader implements Reader {
     @Override
     public void onRead(Client client) {
