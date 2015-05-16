@@ -12,7 +12,6 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeoutException;
 
 import org.threadly.concurrent.NoThreadScheduler;
 import org.threadly.concurrent.SchedulerServiceInterface;
@@ -90,16 +89,6 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
         Client nc = clients.putIfAbsent(client.getChannel(), client);
         if(nc == null) {
           scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_CONNECT));
-          scheduler.schedule(new Runnable() {
-            @Override
-            public void run() {
-              if(client.hasConnectionTimedOut()) {
-                client.setConnectionStatus(new TimeoutException("Timed out while connecting!"));
-                if(client.isClosed() && clients.containsKey(client)) {
-                  removeClient(client);
-                }
-              }
-            }}, client.getTimeout()+10);
           selector.wakeup();
         }
       }

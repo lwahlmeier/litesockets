@@ -13,7 +13,6 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeoutException;
 
 import org.threadly.concurrent.ConfigurableThreadFactory;
 import org.threadly.concurrent.KeyDistributedExecutor;
@@ -23,7 +22,6 @@ import org.threadly.concurrent.SingleThreadScheduler;
 import org.threadly.litesockets.utils.SimpleByteStats;
 import org.threadly.util.AbstractService;
 import org.threadly.util.ArgumentVerifier;
-import org.threadly.util.Clock;
 
 
 /**
@@ -119,16 +117,6 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
         if(nc == null) {
           readScheduler.execute(new AddToSelector(client, readSelector, SelectionKey.OP_CONNECT));
           readSelector.wakeup();
-          schedulerPool.schedule(new Runnable() {
-            @Override
-            public void run() {
-              if(client.hasConnectionTimedOut()) {
-                client.setConnectionStatus(new TimeoutException("Timed out while connecting!"));
-                if(client.isClosed() && clients.containsKey(client)) {
-                  removeClient(client);
-                }
-              }
-            }}, client.getTimeout() + Clock.AUTOMATIC_UPDATE_FREQUENCY_IN_MS);
         }
       }
     }
