@@ -3,7 +3,6 @@ package org.threadly.litesockets;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.CancelledKeyException;
-import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.DatagramChannel;
 import java.nio.channels.SelectableChannel;
@@ -11,15 +10,8 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.util.concurrent.ConcurrentHashMap;
 
 import org.threadly.concurrent.NoThreadScheduler;
-import org.threadly.concurrent.SchedulerServiceInterface;
-import org.threadly.concurrent.future.ListenableFuture;
-import org.threadly.litesockets.ThreadedSocketExecuter.SocketExecuterByteStats;
-import org.threadly.litesockets.utils.SimpleByteStats;
-import org.threadly.litesockets.utils.WatchdogCache;
-import org.threadly.util.AbstractService;
 import org.threadly.util.ArgumentVerifier;
 import org.threadly.util.ExceptionUtils;
 
@@ -41,31 +33,16 @@ import org.threadly.util.ExceptionUtils;
  * 
  * @author lwahlmeier
  */
-public class NoThreadSocketExecuter extends AbstractService implements SocketExecuterInterface {
-  public static final int WATCHDOG_CLEANUP_TIME = 30000;
-  
-  private final NoThreadScheduler scheduler = new NoThreadScheduler();
-  private final ConcurrentHashMap<SocketChannel, Client> clients = new ConcurrentHashMap<SocketChannel, Client>();
-  private final ConcurrentHashMap<SelectableChannel, Server> servers = new ConcurrentHashMap<SelectableChannel, Server>();
-  private final SocketExecuterByteStats stats = new SocketExecuterByteStats();
-  private final WatchdogCache dogCache = new WatchdogCache(scheduler);
-  private final Runnable watchDogCleanup = new Runnable() {
-    @Override
-    public void run() {
-      if(isRunning()) {
-        try{
-          dogCache.cleanup();
-        } finally {
-          scheduler.schedule(this, WATCHDOG_CLEANUP_TIME);
-        }
-      }
-    }};
+public class NoThreadSocketExecuter extends SocketExecuterSharedBase implements SocketExecuterInterface {
+  private final NoThreadScheduler scheduler;
   private volatile Selector selector;
 
   /**
    * Constructs a NoThreadSocketExecuter.  {@link #start()} must still be called before using it.
    */
   public NoThreadSocketExecuter() {
+    super(new NoThreadScheduler());
+    scheduler = (NoThreadScheduler)schedulerPool;
   }
 
   /**
@@ -81,121 +58,29 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
   }
 
   @Override
-  public void addClient(final Client client) {
-    ArgumentVerifier.assertNotNull(client, "Client");
-    if(! client.isClosed() && client.getProtocol() == WireProtocol.TCP && isRunning()) {
-      client.setClientsThreadExecutor(scheduler);
-      client.setClientsSocketExecuter(this);
-      if(client.getChannel() != null && client.getChannel().isConnected()) {
-        Client nc = clients.putIfAbsent(client.getChannel(), client);
-        if(nc == null) {
-          if(client.canRead() && client.canWrite()) {
-            scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_READ|SelectionKey.OP_WRITE));
-          } else if(client.canRead() ) {
-            scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_READ));
-          } else if(client.canWrite()) {
-            scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE));  
-          }
-          selector.wakeup();
-        }
-      } else {
-        if(client.getChannel() == null) {
-          client.connect();
-        }
-        Client nc = clients.putIfAbsent(client.getChannel(), client);
-        if(nc == null) {
-          scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_CONNECT));
-          dogCache.watch(client.connect(), client.getTimeout());
-          selector.wakeup();
-        }
-      }
-    }
-  }
-
-  @Override
-  public void removeClient(Client client) {
-    ArgumentVerifier.assertNotNull(client, "Client");
-    if(isRunning()) {
-      Client c = clients.remove(client.getChannel());
-      if(c != null) {
-        SelectionKey sk = client.getChannel().keyFor(selector);
-        if(sk != null) {
-          scheduler.execute(new RemoveFromSelector(client.getChannel(), selector));
-          selector.wakeup();
-        }
-      }
-    }
-  }
-
-  @Override
-  public void addServer(final Server server) {
-    ArgumentVerifier.assertNotNull(server, "Server");
-    if(isRunning() && server.getSelectableChannel().isOpen()) {
-      Server sn = servers.putIfAbsent(server.getSelectableChannel(), server);
-      if(sn == null) {
-        server.setSocketExecuter(this);
-        server.setThreadExecutor(scheduler);
-        if(server.getServerType() == WireProtocol.TCP) {
-          scheduler.execute(new AddToSelector(server.getSelectableChannel(), selector, SelectionKey.OP_ACCEPT));
-        } else if (server.getServerType() == WireProtocol.UDP) {
-          scheduler.execute(new AddToSelector(server.getSelectableChannel(), selector, SelectionKey.OP_READ));
-        }
-        selector.wakeup();
-      }
-    }
-  }
-
-  @Override
-  public void removeServer(Server server) {
-    ArgumentVerifier.assertNotNull(server, "Server");
-    if(isRunning()) {
-      Server s = servers.remove(server.getSelectableChannel());
-      if(s != null) {
-        scheduler.execute(new RemoveFromSelector(server.getSelectableChannel(), selector));
-        selector.wakeup();
-      }
-    }
-  }
-
-  @Override
   public void flagNewWrite(Client client) {
-    ArgumentVerifier.assertNotNull(client, "Client");
-    if(isRunning() && clients.containsKey(client.getChannel())) {
-      if(client.canRead()) {
-        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE|SelectionKey.OP_READ));
-      } else {
-        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE));
-      }
-      selector.wakeup();
-    }
+    updateClientState(client);
   }
 
   @Override
   public void flagNewRead(Client client) {
+    updateClientState(client);
+  }
+  
+  private void updateClientState(Client client) {
     ArgumentVerifier.assertNotNull(client, "Client");
     if(isRunning() && clients.containsKey(client.getChannel())) {
-      if(client.canWrite()) {
-        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_WRITE|SelectionKey.OP_READ));
-      } else {
-        scheduler.execute(new AddToSelector(client.getChannel(), selector, SelectionKey.OP_READ));
-      }
-      selector.wakeup();
+      if(client.canWrite() && client.canRead()) {
+        schedulerPool.execute(new AddClientToSelector(client, selector, SelectionKey.OP_WRITE|SelectionKey.OP_READ));
+        selector.wakeup();
+      } else if (client.canRead()){
+        schedulerPool.execute(new AddClientToSelector(client, selector, SelectionKey.OP_READ));
+        selector.wakeup();
+      } else if (client.canWrite()){
+        schedulerPool.execute(new AddClientToSelector(client, selector, SelectionKey.OP_WRITE));
+        selector.wakeup();
+      } 
     }
-  }
-
-  @Override
-  public int getClientCount() {
-    return clients.size();
-  }
-
-  @Override
-  public int getServerCount() {
-    return servers.size();
-  }
-
-  @Override
-  public SchedulerServiceInterface getThreadScheduler() {
-    return this.scheduler;
   }
 
   @Override
@@ -264,23 +149,7 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
             if (key.isConnectable() ) {
               SocketChannel sc = (SocketChannel)key.channel();
               final Client client = clients.get(sc);
-              if(sc.isConnectionPending()) {
-                try {
-                  boolean tmp = sc.finishConnect();
-                  if(tmp) {
-                    client.setConnectionStatus(null);
-                    if(client.canWrite()) {
-                      flagNewWrite(client);
-                    } else if (client.canRead()) {
-                      flagNewRead(client);
-                    }
-                  }
-                } catch(IOException e) {
-                  client.setConnectionStatus(e);
-                  removeClient(client);
-                  client.close();
-                }
-              }
+              doConnect(client);
             }
             if(key.isAcceptable()) {
               ServerSocketChannel server = (ServerSocketChannel) key.channel();
@@ -292,17 +161,36 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
               doWrite(sc);
             }
           } catch(CancelledKeyException e) {
-            //Key could be cancelled at any point, we dont really care about it.
+            exceptionHandler.handleException(e);
           }
         }
       } catch (IOException e) {
-        //There is really nothing to do here but try again, usually this is because of shutdown.
+        exceptionHandler.handleException(e);
       } catch(ClosedSelectorException e) {
-        //We do nothing here because the next loop should not happen now.
+        exceptionHandler.handleException(e);
       } catch (NullPointerException e) {
-        //There is a bug in some JVMs around this where the select() can throw an NPE from native code.
+        exceptionHandler.handleException(e);
       }
       scheduler.tick(null);
+    }
+  }
+  
+  private void doConnect(Client client) {
+    if(client.getChannel().isConnectionPending()) {
+      try {
+        if(client.getChannel().finishConnect()) {
+          client.setConnectionStatus(null);
+          if(client.canWrite()) {
+            flagNewWrite(client);
+          } else if (client.canRead()) {
+            flagNewRead(client);
+          }
+        }
+      } catch(IOException e) {
+        client.setConnectionStatus(e);
+        removeClient(client);
+        client.close();
+      }
     }
   }
 
@@ -337,7 +225,6 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
           readByteBuffer.position(origPos+read);
           resultBuffer.limit(read);
           client.addReadBuffer(resultBuffer.asReadOnlyBuffer());
-          //client.callReader();
           if(! client.canWrite()  && ! client.canRead()) {
             client.getChannel().register(selector, 0);
           } else if (! client.canRead()  ) {
@@ -375,88 +262,37 @@ public class NoThreadSocketExecuter extends AbstractService implements SocketExe
     }
   }
 
-  private void flushOutSelector() {
-    try {
-      selector.selectNow();
-    } catch (IOException e) {
-    }
-  }
-
-  /**
-   * This class is a helper runnable to generically remove SelectableChannels from a selector.
-   * 
-   *
-   */
-  private class RemoveFromSelector implements Runnable {
-    SelectableChannel localChannel;
-    Selector localSelector;
-
-    public RemoveFromSelector(SelectableChannel channel, Selector selector) {
-      localChannel = channel;
-      localSelector = selector;
-    }
-
-    @Override
-    public void run() {
-      if(isRunning()) {
-        SelectionKey sk = localChannel.keyFor(localSelector);
-        if(sk != null) {
-          sk.cancel();
-          flushOutSelector();
-        }
-      }
-    }
-  }
-
-  /**
-   * This class is a helper runnable to generically add SelectableChannels to a selector for certain operations.
-   * 
-   */
-  private class AddToSelector implements Runnable {
-    SelectableChannel localChannel;
-    Selector localSelector;
-    int registerType;
-
-    public AddToSelector(SelectableChannel channel, Selector selector, int registerType) {
-      localChannel = channel;
-      localSelector = selector;
-      this.registerType = registerType;
-    }
-
-    @Override
-    public void run() {
-      if(isRunning()) {
-        try {
-          flushOutSelector();
-          localChannel.register(localSelector, registerType);
-        } catch (ClosedChannelException e) {
-          removeChannel();
-        } catch (CancelledKeyException e) {
-
-        }
-      }
-    }
-
-    private void removeChannel() {
-      Client client = clients.remove(localChannel);
-      Server server = servers.remove(localChannel);
-      if(client != null) {
-        removeClient(client);
-        client.close();
-      } else if (server != null){
-        removeServer(server);
-        server.close();
-      }
-    }
+  @Override
+  protected void connectClient(Client client) {
+    schedulerPool.execute(new AddClientToSelector(client, selector, SelectionKey.OP_CONNECT));
+    wakeup();
   }
 
   @Override
-  public SimpleByteStats getStats() {
-    return stats;
+  protected void setClientThreadExecutor(Client client) {
+    client.setClientsThreadExecutor(scheduler);
   }
-  
+
   @Override
-  public void watchFuture(ListenableFuture<?> lf, long delay) {
-    dogCache.watch(lf, delay);
+  protected void addServerToSelectors(Server server) {
+    if(server.getServerType() == WireProtocol.TCP) {
+      schedulerPool.execute(new AddServerToSelector(server, selector, SelectionKey.OP_ACCEPT));
+    } else {
+      schedulerPool.execute(new AddServerToSelector(server, selector, SelectionKey.OP_READ));
+    }
+    wakeup();
   }
+
+  @Override
+  protected void removeServerFromSelectors(Server server) {
+    schedulerPool.execute(new RemoveFromSelector(server.getSelectableChannel(), selector));
+    wakeup();
+  }
+
+  @Override
+  protected void removeClientFromSelectors(Client client) {
+    schedulerPool.execute(new RemoveFromSelector(client.getChannel(), selector));
+    wakeup();    
+  }
+
 }

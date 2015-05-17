@@ -15,8 +15,9 @@ import javax.net.ssl.X509TrustManager;
  */
 public class SSLUtils {
   public static final String SSL_HANDSHAKE_ERROR = "Problem doing SSL Handshake";
-  public static final TrustManager[] OPEN_TRUST_MANAGER = new TrustManager [] {new SSLUtils.FullTrustManager() };
   public static final SSLContext OPEN_SSL_CTX; 
+  
+  private static final TrustManager[] OPEN_TRUST_MANAGER = new TrustManager [] {new SSLUtils.FullTrustManager() };
   
   static {
     try {

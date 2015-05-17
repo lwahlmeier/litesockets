@@ -1,6 +1,7 @@
 package org.threadly.litesockets.utils;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.util.LinkedList;
 import java.util.concurrent.ExecutionException;
@@ -13,7 +14,7 @@ import org.threadly.test.concurrent.TestableScheduler;
 
 
 public class WatchdogCacheTests {
-
+  
   @Test
   public void cleanupTest() {
     int test_amount = 60;

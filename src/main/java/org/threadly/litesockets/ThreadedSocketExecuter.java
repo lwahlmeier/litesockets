@@ -2,16 +2,12 @@ package org.threadly.litesockets;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.CancelledKeyException;
-import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.DatagramChannel;
-import java.nio.channels.SelectableChannel;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 
 import org.threadly.concurrent.ConfigurableThreadFactory;
@@ -19,10 +15,6 @@ import org.threadly.concurrent.KeyDistributedExecutor;
 import org.threadly.concurrent.ScheduledExecutorServiceWrapper;
 import org.threadly.concurrent.SimpleSchedulerInterface;
 import org.threadly.concurrent.SingleThreadScheduler;
-import org.threadly.concurrent.future.ListenableFuture;
-import org.threadly.litesockets.utils.SimpleByteStats;
-import org.threadly.litesockets.utils.WatchdogCache;
-import org.threadly.util.AbstractService;
 import org.threadly.util.ArgumentVerifier;
 
 
@@ -36,8 +28,8 @@ import org.threadly.util.ArgumentVerifier;
  * @author lwahlmeier
  *
  */
-public class ThreadedSocketExecuter extends AbstractService implements SocketExecuterInterface {
-  public static final int WATCHDOG_CLEANUP_TIME = 30000;
+public class ThreadedSocketExecuter extends SocketExecuterSharedBase implements SocketExecuterInterface {
+
   private final SingleThreadScheduler acceptScheduler = 
       new SingleThreadScheduler(new ConfigurableThreadFactory("SocketAcceptor", false, true, Thread.currentThread().getPriority(), null, null));
   private final SingleThreadScheduler readScheduler = 
@@ -45,22 +37,6 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
   private final SingleThreadScheduler writeScheduler = 
       new SingleThreadScheduler(new ConfigurableThreadFactory("SocketWriter", false, true, Thread.currentThread().getPriority(), null, null));
   private final KeyDistributedExecutor clientDistributer;
-  private final SimpleSchedulerInterface schedulerPool;
-  private final ConcurrentHashMap<SocketChannel, Client> clients = new ConcurrentHashMap<SocketChannel, Client>();
-  private final ConcurrentHashMap<SelectableChannel, Server> servers = new ConcurrentHashMap<SelectableChannel, Server>();
-  private final SocketExecuterByteStats stats = new SocketExecuterByteStats();
-  private final Runnable watchDogCleanup = new Runnable() {
-    @Override
-    public void run() {
-      if(isRunning()) {
-        try{
-          dogCache.cleanup();
-        } finally {
-          schedulerPool.schedule(this, WATCHDOG_CLEANUP_TIME);
-        }
-      }
-    }};
-  private final WatchdogCache dogCache;
 
   protected volatile long readThreadID = 0;
   protected Selector readSelector;
@@ -99,111 +75,8 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
    * @param exec the {@link ScheduledExecutorService} to be used for client/server callbacks.
    */
   public ThreadedSocketExecuter(SimpleSchedulerInterface exec) {
-    ArgumentVerifier.assertNotNull(exec, "SimpleSchedulerInterface");
-    schedulerPool = exec;
+    super(exec);
     clientDistributer = new KeyDistributedExecutor(schedulerPool);
-    dogCache = new WatchdogCache(schedulerPool);
-  }
-
-  @Override
-  public void addClient(final Client client) {
-    ArgumentVerifier.assertNotNull(client, "Client");
-    if(! client.isClosed() && client.getProtocol() == WireProtocol.TCP && isRunning()) {
-      client.setClientsThreadExecutor(clientDistributer.getSubmitterForKey(client));
-      client.setClientsSocketExecuter(this);
-      if(client.getChannel() != null && client.getChannel().isConnected()) {
-        Client nc = clients.putIfAbsent(client.getChannel(), client);
-        if(nc == null) {
-          if(client.canRead()) {
-            readScheduler.execute(new AddToSelector(client, readSelector, SelectionKey.OP_READ));
-            readSelector.wakeup();
-          }
-          if(client.canWrite()) {
-            writeScheduler.execute(new AddToSelector(client, writeSelector, SelectionKey.OP_WRITE));
-            writeSelector.wakeup();  
-          }
-        }
-      } else {
-        if(client.getChannel() == null) {
-          client.connect();
-        }
-        Client nc = clients.putIfAbsent(client.getChannel(), client);
-        if(nc == null) {
-          readScheduler.execute(new AddToSelector(client, readSelector, SelectionKey.OP_CONNECT));
-          readSelector.wakeup();
-          dogCache.watch(client.connect(), client.getTimeout());
-        }
-      }
-    }
-  }
-
-  @Override
-  public void removeClient(Client client) {
-    ArgumentVerifier.assertNotNull(client, "Client");
-    if(isRunning()) {
-      Client c = clients.remove(client.getChannel());
-      if(c != null) {
-        SelectionKey sk = client.getChannel().keyFor(readSelector);
-        SelectionKey sk2 = client.getChannel().keyFor(writeSelector);
-        if(sk != null) {
-          sk.cancel();
-          readSelector.wakeup();
-        }
-        if(sk2 != null) {
-          sk2.cancel();
-          writeSelector.wakeup();
-        }
-      }
-    }
-  }
-
-  @Override
-  public void addServer(final Server server) {
-    ArgumentVerifier.assertNotNull(server, "Server");
-    if(isRunning()) {
-      Server sn = servers.putIfAbsent(server.getSelectableChannel(), server);
-      if(sn == null) {
-        server.setSocketExecuter(this);
-        server.setThreadExecutor(schedulerPool);
-        acceptScheduler.execute(new Runnable() {
-          @Override
-          public void run() {
-            SelectionKey key = server.getSelectableChannel().keyFor(acceptSelector);
-            if(key == null) {
-              try {
-                if(server.getServerType() == WireProtocol.TCP) {
-                  server.getSelectableChannel().register(acceptSelector, SelectionKey.OP_ACCEPT);
-                } else if(server.getServerType() == WireProtocol.UDP) {
-                  server.getSelectableChannel().register(acceptSelector, SelectionKey.OP_READ);
-                }
-              } catch (ClosedChannelException e) {
-                removeServer(server);
-                server.close();
-              }
-            }
-          }});
-        acceptSelector.wakeup();
-      }
-    }
-  }
-
-  @Override
-  public void removeServer(Server server) {
-    ArgumentVerifier.assertNotNull(server, "Server");
-    if(isRunning()) {
-      servers.remove(server.getSelectableChannel());
-      SelectionKey key = null;
-      if(server.getServerType() == WireProtocol.TCP) {
-        key = server.getSelectableChannel().keyFor(acceptSelector);
-      } else {
-        key = server.getSelectableChannel().keyFor(readSelector);
-      }
-      if(key != null && key.isValid()) {
-        key.cancel();
-      }
-      acceptSelector.wakeup();
-      readSelector.wakeup();
-    }
   }
 
   @Override
@@ -251,7 +124,7 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
   public void flagNewWrite(Client client) {
     ArgumentVerifier.assertNotNull(client, "Client");
     if(isRunning() && clients.containsKey(client.getChannel())) {
-      writeScheduler.execute(new AddToSelector(client, writeSelector, SelectionKey.OP_WRITE));
+      writeScheduler.execute(new AddClientToSelector(client, writeSelector, SelectionKey.OP_WRITE));
       writeSelector.wakeup();
     }
   }
@@ -260,34 +133,9 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
   public void flagNewRead(Client client) {
     ArgumentVerifier.assertNotNull(client, "Client");
     if(isRunning() && clients.containsKey(client.getChannel())) {
-      readScheduler.execute(new AddToSelector(client, readSelector, SelectionKey.OP_READ));
+      readScheduler.execute(new AddClientToSelector(client, readSelector, SelectionKey.OP_READ));
       readSelector.wakeup();
     }
-  }
-
-  @Override
-  public int getClientCount() {
-    return clients.size();
-  }
-
-  @Override
-  public int getServerCount() {
-    return servers.size();
-  }
-  
-  /**
-   * <p>This is used to figure out if the current used thread is the SocketExecuters ReadThread.
-   * This is used by clients to Enforce certain threads to do certain public tasks.</p>
-   * 
-   * 
-   * @return a boolean to tell you if the current thread is the readThread for this executer.
-   */
-  public boolean verifyReadThread() {
-    long tid = Thread.currentThread().getId();
-    if(tid != readThreadID) {
-      return false;
-    }
-    return true;
   }
 
   /**
@@ -444,63 +292,44 @@ public class ThreadedSocketExecuter extends AbstractService implements SocketExe
     }
   }
 
-  /**
-   * This class is a helper runnable to generically add SelectableChannels to a selector for certain operations.
-   * 
-   */
-  private class AddToSelector implements Runnable {
-    Client localClient;
-    Selector localSelector;
-    int registerType;
+  @Override
+  protected void connectClient(Client client) {
+    readScheduler.execute(new AddClientToSelector(client, readSelector, SelectionKey.OP_CONNECT));
+    readSelector.wakeup();
+  }
 
-    public AddToSelector(Client client, Selector selector, int registerType) {
-      localClient = client;
-      localSelector = selector;
-      this.registerType = registerType;
-    }
+  @Override
+  protected void setClientThreadExecutor(Client client) {
+    client.setClientsThreadExecutor(clientDistributer.getSubmitterForKey(client));
+  }
 
-    @Override
-    public void run() {
-      if(isRunning()) {
-        try {
-          localClient.getChannel().register(localSelector, registerType);
-        } catch (ClosedChannelException e) {
-          removeClient(localClient);
-          localClient.close();
-        } catch (CancelledKeyException e) {
-          removeClient(localClient);
-        }
-      }
+  @Override
+  protected void addServerToSelectors(Server server) {
+    if(server.getServerType() == WireProtocol.TCP) {
+      acceptScheduler.execute(new AddServerToSelector(server, acceptSelector, SelectionKey.OP_ACCEPT));
+      acceptSelector.wakeup();
+    } else {
+      acceptScheduler.execute(new AddServerToSelector(server, acceptSelector, SelectionKey.OP_READ));
+      acceptSelector.wakeup();  
     }
   }
 
   @Override
-  public SimpleSchedulerInterface getThreadScheduler() {
-    return schedulerPool;
-  }
-
-  @Override
-  public SimpleByteStats getStats() {
-    return stats;
-  }
-  
-  /**
-   * Implementation of the SimpleByteStats.
-   */
-  protected static class SocketExecuterByteStats extends SimpleByteStats {
-    @Override
-    protected void addWrite(int size) {
-      super.addWrite(size);
-    }
-    
-    @Override
-    protected void addRead(int size) {
-      super.addRead(size);
+  protected void removeServerFromSelectors(Server server) {
+    if(server.getServerType() == WireProtocol.TCP) {
+      acceptScheduler.execute(new RemoveFromSelector(server.getSelectableChannel(), acceptSelector));
+      acceptSelector.wakeup();
+    } else {
+      readScheduler.execute(new RemoveFromSelector(server.getSelectableChannel(), readSelector));
+      readSelector.wakeup();  
     }
   }
 
   @Override
-  public void watchFuture(ListenableFuture<?> lf, long delay) {
-    dogCache.watch(lf, delay);
+  protected void removeClientFromSelectors(Client client) {
+    readScheduler.execute(new RemoveFromSelector(client.getChannel(), readSelector));
+    writeScheduler.execute(new RemoveFromSelector(client.getChannel(), writeSelector));
+    readSelector.wakeup();
+    writeSelector.wakeup();
   }
 }

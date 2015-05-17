@@ -36,15 +36,6 @@ public class ServerExecuterTests {
   }
   
   @Test
-  public void checkReadThread() {
-    final boolean badCheck = SE.verifyReadThread();
-    assertFalse(badCheck);
-    SE.readThreadID = Thread.currentThread().getId();
-    final boolean goodCheck = SE.verifyReadThread();
-    assertTrue(goodCheck);
-  }
-  
-  @Test
   public void manyClientsTest() throws IOException, InterruptedException {
     TCPServer server = new TCPServer("localhost", port);
     final FakeTCPServerClient serverFC = new FakeTCPServerClient(SE);
