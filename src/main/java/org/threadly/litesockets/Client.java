@@ -34,16 +34,6 @@ import org.threadly.util.Clock;
  */
 public abstract class Client {
 
-  /**
-   * SocketOptions that can be set set on Clients.
-   * 
-   * @author lwahlmeier
-   * @deprecated this is deprecated in favor of {@link ClientOptions}
-   */
-  @Deprecated
-  public static enum SocketOption {
-    TCP_NODELAY, SEND_BUFFER_SIZE, RECV_BUFFER_SIZE, UDP_FRAME_SIZE, USE_NATIVE_BUFFERS
-  }
 
   /**
    * Default max buffer size (64k).  Read and write buffers are independent of each other.
@@ -152,17 +142,6 @@ public abstract class Client {
    * @return false if the client has been connected, true if it has not connected and the timeout limit has been reached.
    */
   public abstract boolean hasConnectionTimedOut();
-
-  /**
-   * <p>This lets you set lower level socket options for this client.  Mainly Buffer sizes and no delay options.</p>
-   * 
-   * @param so The {@link SocketOption} to set for the client.
-   * @param value The value for the socket option (1 for on, 0 for off).
-   * @return True if the option was set, false if not.
-   * @deprecated use the {@link #clientOptions()} call.
-   */
-  @Deprecated
-  public abstract boolean setSocketOption(SocketOption so, int value);
 
   public abstract ClientOptions clientOptions();
 
@@ -379,24 +358,6 @@ public abstract class Client {
         }
       }
     }
-  }
-
-  /**
-   * <p>This allows you to set/change the max buffer size for this client object.
-   * This is the in java memory buffer not the additional socket buffer the OS might setup.</p>
-   * 
-   * <p>In general this should be set to the max size you can deal with.  The lower this is the more often we
-   * will end up adding/removing the client from the selectors.  Only the read buffer really follows this, 
-   * writes will buffer up as much as you let it.  You need room in your heap for buffers for all clients.
-   * This buffer is not kept at full size, so clients will rarely use that much memory assuming the the protocol parsing 
-   * and network are keeping up with the data going in/out.</p>
-   * 
-   * @param size max buffer size in bytes.
-   * @deprecated use the {@link #clientOptions()} and set the {@link ClientOptions#setMaxClientReadBuffer(int size)} call.
-   */
-  @Deprecated
-  public void setMaxBufferSize(final int size) {
-    clientOptions().setMaxClientReadBuffer(size);
   }
 
   /**

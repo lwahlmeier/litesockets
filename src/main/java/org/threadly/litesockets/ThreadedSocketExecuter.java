@@ -115,15 +115,19 @@ public class ThreadedSocketExecuter extends SocketExecuterCommonBase {
       } else if(client.canWrite() && client.canRead()) {
         writeScheduler.execute(new AddToSelector(writeScheduler, client, writeSelector, SelectionKey.OP_WRITE));
         readScheduler.execute(new AddToSelector(readScheduler, client, readSelector, SelectionKey.OP_READ));
+        //System.out.println("Add Both");
       } else if (client.canRead()){
         readScheduler.execute(new AddToSelector(readScheduler, client, readSelector, SelectionKey.OP_READ));
         writeScheduler.execute(new AddToSelector(writeScheduler, client, writeSelector, 0));
+        //System.out.println("Add Read Only");
       } else if (client.canWrite()){
         writeScheduler.execute(new AddToSelector(writeScheduler, client, writeSelector, SelectionKey.OP_WRITE));
         readScheduler.execute(new AddToSelector(readScheduler, client, readSelector, 0));
+        //System.out.println("Add Write only");
       } else {
         writeScheduler.execute(new AddToSelector(writeScheduler, client, writeSelector, 0));
         readScheduler.execute(new AddToSelector(readScheduler, client, readSelector, 0));
+        //System.out.println("Remove All!");
       }
     }
     readSelector.wakeup();
@@ -275,3 +279,4 @@ public class ThreadedSocketExecuter extends SocketExecuterCommonBase {
     return clientDistributer.getSubmitterForKey(obj);
   }
 }
+

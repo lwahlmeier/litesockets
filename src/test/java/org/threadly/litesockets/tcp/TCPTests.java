@@ -254,7 +254,7 @@ public class TCPTests {
   public void clientBlockingWriter() throws Exception {
     final ByteBuffer bb = ByteBuffer.wrap("TEST111".getBytes());
     final TCPClient client = SE.createTCPClient("localhost", port);
-    client.setMaxBufferSize(2);
+    client.clientOptions().setMaxClientReadBuffer(2);
     serverFC.addTCPClient(client);
     new TestCondition(){
       @Override
@@ -263,7 +263,7 @@ public class TCPTests {
       }
     }.blockTillTrue(5000);
     TCPClient c2 = serverFC.getClientAt(1);
-    c2.setMaxBufferSize(2);
+    c2.clientOptions().setMaxClientReadBuffer(2);
     ArrayList<ListenableFuture<?>> lfl = new ArrayList<ListenableFuture<?>>(); 
     for(int i=0; i<100; i++) {
       lfl.add(c2.write(bb.duplicate()));
@@ -298,7 +298,7 @@ public class TCPTests {
     System.out.println("1");
     ByteBuffer bb = ByteBuffer.wrap(text.toString().getBytes());
     final TCPClient client = SE.createTCPClient("localhost", port);
-    client.setMaxBufferSize(2);
+    client.clientOptions().setMaxClientReadBuffer(2);
     client.setReader(new Reader() {
       @Override
       public void onRead(Client client) {
@@ -315,7 +315,7 @@ public class TCPTests {
     }.blockTillTrue(5000, 100);
     System.out.println("4");
     final TCPClient c2 = serverFC.getClientAt(0);    
-    c2.setMaxBufferSize(60000);
+    c2.clientOptions().setMaxClientReadBuffer(60000);
     System.out.println("5");
     c2.write(bb.duplicate());
     System.out.println("6");
